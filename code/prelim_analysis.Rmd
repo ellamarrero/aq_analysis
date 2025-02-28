@@ -1,0 +1,208 @@
+---
+title: "Initial Analysis -- Air Quality in European Cities"
+output: html_document
+date: "2025-02-05"
+---
+
+```{r setup, include=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(glue)
+library(kableExtra)
+library(janitor)
+library(here)
+```
+
+
+## Load and check data
+```{r load data, message=FALSE}
+an <- read_csv(here('data/ancona_data.csv'))
+ath <- read_csv(here('data/athens_data.csv'))
+zaz <- read_csv(here('data/zaragoza_data.csv'))
+```
+
+```{r examine data}
+# check for same vars in each city df
+df_lst <- list(an, ath, zaz)
+names(df_lst) <- c("an", "ath", "zaz")
+map(df_lst, ~select(.,order(colnames(.))) %>% colnames())
+```
+
+All datasets have the same number of variables except for ZAZ, which is missing [PM2.5, code, id] (so I'll have to use station name as the unique identifier).
+
+
+## Project Goals
+### project purpose: (see kaggle source)
+The primary environmental health threat in the European Region is air pollution, which impacts the daily health and well-being of its citizens significantly.  To effectively understand the impact and dynamics of air quality, a detailed investigation of different environmental, weather, and land cover indices is appropriate. To this end, three European cities’ spatio-temporal datasets are customized for air pollution monitoring at a regional level. 
+
+### *data notes:*
+The duration is approximately from **2020 to 2023**, with an **hourly temporal resolution** and a **spatial resolution of 0.005 degrees**.
+
+#### *codebook*
+| varname | units | description | 
+| :---- | :---- | :---- |
+| `Date` |  (YYYY-MM-DD HH:MM:SS) | Date and time of observation | 
+| `NO2` | μg/m3 | Nitrogen dioxide concentration in atmosphere | 
+| `O3` | μg/m3 | Ozone concentration in atmosphere. Numerous studies of the interaction of nitrogen dioxide with other air pollutants, predominantly ozone, show that the effects are due to ozone alone, are additive or are synergistic| 
+| `PM10` | μg/m3 | Atmospheric aerosols concentration with a maximum particle diameter of 10 micrometers | 
+| `PM2.5` | μg/m3 | Atmospheric aerosols concentration with a maximum particle diameter of 2.5 micrometers | 
+| `Latitude` | degrees | Geographic coordinate |
+| `Longitude` | degrees | Geographic coordinate | 
+| `Wind-Speed (U)` | m/s | The U wind component is parallel to the x-axis (i.e. longitude). A positive U wind comes from the west, and a negative U wind comes from the east | 
+| `Wind-Speed (V)` | m/s | The V wind component is parallel to the y-axis (i.e. latitude). A positive V wind comes from the south, and a negative V wind comes from the north |
+| `Dewpoint Temp` |  | The temperature point at which the air can hold no more water (water vapor).
+| `Temp` |  | Air temperature |
+| `Vegitation (High)` | | High-level plant cover |
+| `Vegitation (Low)` | | Low-level plant cover |
+| `Soil Temp` |  | The average soil temperature | 
+| `Total Percipitation` | mm | The flux of water equivalent (rain or snow) reaching the land surface |
+| `Relative Humidity` | % | Actual amount of water vapor in the air compared to the total amount of vapor that can exist in the air at its current temperature
+| `code` | | Code of air quality monitoring station (missing for zaz) |
+| `id` | | ID of air quality monitoring station (missing for zaz) |
+| `station_name` |  | Air quality monitoring station name.
+
+#### pollutant standards  
+*note on pollutant standards* ([eu aq standards](https://environment.ec.europa.eu/topics/air/air-quality/eu-air-quality-standards_en))
+| pollutant | µg/m3 | time period | permitted exceed per year | 
+| :-------- | :---- | :---------- | :--------------- | 
+| PM2.5 | 25  | 1yr |  NA |
+| PM10 | 40  | 1yr |  NA |
+| O3 | 120  | 8hr daily avg |  25 days averaged over 3 years |
+| NO2 | 200 | 1 hr | 18 |
+
+## Analysis 
+
+First, we begin by tidying the data -- we must check each variable type and convert as needed. 
+```{r rename}
+tidy_names <- function(df){
+  names(df) = str_to_lower(names(df))
+  names(df) = str_replace_all(names(df)," ", "_")
+  names(df) = str_replace_all(names(df),"-", "_")
+  names(df) = str_replace_all(names(df),"\\(*\\)*","")
+  return(df)
+}
+
+df_lst <- map(df_lst, ~tidy_names(.))
+
+# convert station names to factors 
+df_lst <- map(df_lst, ~mutate(., station_name = as.factor(station_name),
+                              date = as.Date(date)))
+```
+
+```{r tidy_time}
+# Separate hours/months/years into different time vars (will be easier to deal with) 
+an <- df_lst$an
+
+an <- an %>% 
+  mutate(
+    year = year(date),
+    month = month(date),
+    hour = hour(date),
+    yearmon = format(date, "%Y-%m")
+  )
+```
+
+
+```{r var_check_pollutants}
+#check out each variable
+ggplot(an, aes(x=no2))+ # AN - NO2
+  geom_histogram()
+# Skewed-right distribution
+ggplot(an, aes(x=o3))+ # AN - O3
+  geom_histogram()
+# Almost normal distribution (sligth skew right, but because starts at 0)
+ggplot(an, aes(x=pm10))+ # AN - PM10
+  geom_histogram()
+# Skewed-right distribution
+ggplot(an, aes(x=pm2.5))+ # AN - PM10
+  geom_histogram()
+# Skewed-right distribution
+```
+
+```{r var_check_stations}
+an %>% group_by(station_name, latitude, longitude) %>% summarize(n=n()) %>% kable() %>% kable_styling() # one lat/long per station
+```
+
+```{r var_check_meteorological}
+ggplot(an, aes(x=wind_speed_u))+ # AN - wind speed (u), 18983 readings per station
+  geom_histogram() # right skewed, range -2 to 2
+ggplot(an, aes(x=wind_speed_v))+ # AN - wind speed (v)
+  geom_histogram() # slight bimodal, range -2.5 to 2.5
+ggplot(an, aes(x=dewpoint_temp))+ # AN - dew point temp
+  geom_histogram()# bimodal distributionm very slight skew (left for higher, right for lower)
+ggplot(an, aes(x=temp))+ # AN - temp
+  geom_histogram() # bimodal distribution, both slightly right skewed F
+ggplot(an, aes(x=vegitation_high))+ # AN - veg high
+  geom_histogram() # ~trimodal distribution, peaks at 2.7, 3.1, 3.4
+ggplot(an, aes(x=vegitation_low))+ # AN - veg low
+  geom_histogram() # ~trimodal distribution, peaks at 2.5, 2.85, 3.1
+ggplot(an, aes(x=soil_temp))+ # AN - soil temp
+  geom_histogram() # gotta be F, bimodal distribution, both right skewed
+ggplot(an, aes(x=total_percipitation))+ # AN - total precip. (flux) - right skewed, mainly 0
+  geom_histogram()
+ggplot(an, aes(x=relative_humidity))+ # AN - rel hum., left skewed
+  geom_histogram()
+```
+
+```{r calc_ws_wd}
+# calculate wind speed and direction from u and v wind components
+library(openair) # wind calc source: https://sgichuki.github.io/Atmo/
+an <- an %>% 
+  mutate(
+    wind_speed_abs = sqrt(wind_speed_u^2+wind_speed_v^2),
+    wind_dir = (270-atan2(wind_speed_u/wind_speed_abs,wind_speed_v/wind_speed_abs)*180/pi)%%360 
+  )
+
+# plot results
+#windRose(an, ws="wind_speed_abs", wd = "wind_dir")
+```
+
+```{r var_stats}
+pollutant_names = c("no2","o3","pm10","pm2.5")
+# for each pollutant, generate count, mean, sd, min, quartiles, max 
+an %>% 
+  select(all_of(pollutant_names)) %>% 
+  map_df(~mosaic::fav_stats(.)) %>% 
+  bind_cols(pollutant = pollutant_names) %>% 
+  select(pollutant, everything()) %>% 
+  kable(row.names=F) %>% kable_styling()
+
+```
+There appears to be a significant amount of missingness for each pollutant. Let's examine the missingness to see if there are obvious temporal or spatial patterns.
+
+```{r check_missingness}
+m_c <- an %>% 
+  select(all_of(pollutant_names), date, year, month, hour, yearmon, station_name, latitude, longitude) %>% 
+  filter(if_any(pollutant_names, is.na))
+
+# spatial check -- by station name 
+tabyl(m_c, station_name) # all the missingness is at the non-numbered stations. 
+# let's take a look at where all the stations are. 
+stations <- an %>% 
+  select(station_name, latitude, longitude) %>% 
+  distinct(station_name,.keep_all = T) %>% 
+  st_as_sf(., coords = c('longitude', 'latitude'),crs = "ESRG:4326") # assuming coordinate system
+```
+
+```{r mapping}
+library(tmap)
+library(osmdata)
+
+city_name <- "Ancona, Italy" 
+
+city_boundary <- opq(city_name) %>%
+  add_osm_feature(key = "boundary", value = "administrative") %>%
+  osmdata_sf()
+
+# Extract only polygons (administrative boundaries)
+city_polygons <- city_boundary$osm_multipolygons
+
+# Plot City Data
+ggplot() +
+  geom_sf(data = city_polygons, fill = "lightblue", color = "blue", alpha = 0.5) +
+  ggtitle(paste("City Boundaries of", city_name))
+# ADD LAYER OF STATINOS
+
+```

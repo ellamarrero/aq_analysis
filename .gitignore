@@ -1,0 +1,7 @@
+# exclude all files except R files (globally)
+*
+!*.gitignore
+!*.R
+!*.md
+!*.Rmd
+!code
